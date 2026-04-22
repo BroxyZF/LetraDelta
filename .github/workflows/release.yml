@@ -1,0 +1,81 @@
+name: Publish release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'   # Se dispara con tags tipo v1.0.0, v1.2.3, etc.
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout (en el tag vX.Y.Z)
+        uses: actions/checkout@v4
+
+      - name: Generar lang.zip
+        run: |
+          cd lang
+          zip -r ../lang.zip .
+
+      - name: Extraer changelog de la versión
+        id: changelog
+        env:
+          VERSION_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${VERSION_TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          VERSION="$VERSION" python3 <<'PY' > changelog.md
+          import json, os, sys
+          version = os.environ["VERSION"]
+          with open("lang/changes.json", encoding="utf-8") as f:
+              data = json.load(f)
+          entry = data.get(version)
+          if not entry:
+              sys.exit(f"No hay entrada para la versión {version} en changes.json")
+          print(entry.get("description", ""))
+          PY
+
+      - name: Publicar Release vX.Y.Z (con lang.zip y changelog)
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Versión ${{ steps.changelog.outputs.version }}" \
+            --notes-file changelog.md \
+            --latest \
+            lang.zip
+
+      - name: Mover el tag 'latest' a este commit
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git tag -f latest
+          git push -f origin latest
+
+      - name: Refrescar Release 'Latest' (mismo lang.zip, URL de descarga estable)
+        env:
+          VERSION_TAG: ${{ github.ref_name }}
+        run: |
+          NOTES="Contiene siempre el \`lang.zip\` de la versión más reciente.
+
+          **Versión actual:** [\`$VERSION_TAG\`](https://github.com/$GITHUB_REPOSITORY/releases/tag/$VERSION_TAG)
+
+          El changelog de cada versión está en su Release correspondiente."
+
+          if gh release view latest >/dev/null 2>&1; then
+            gh release edit latest --notes "$NOTES"
+            gh release upload latest lang.zip --clobber
+          else
+            gh release create latest \
+              --title "Latest" \
+              --notes "$NOTES" \
+              --latest=false \
+              lang.zip
+          fi
